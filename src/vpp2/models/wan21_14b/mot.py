@@ -81,6 +81,31 @@ class MoT(nn.Module):
                 f"  Expert '{name}': num_params={sum(p.numel() for p in expert.parameters()) / 1e9:.2f} B"
             )
 
+    def set_video_block_offload(self, count: int) -> None:
+        """Keep an inference-only tail of video block weights in pinned CPU memory.
+
+        Prefill still computes the complete batch on CUDA and retains every K/V.
+        Each block is loaded once per prefill; its CPU backing remains reusable.
+        """
+        count = int(count)
+        if self.training or not 0 <= count <= self.num_layers:
+            raise ValueError("Video block offload requires evaluation and a valid count.")
+        device = next(self.mixtures["action"].parameters()).device
+        for state in getattr(self, "_video_block_cpu_state", {}).values():
+            for tensor, backing in state:
+                tensor.data = backing.to(device=device)
+        self._video_block_cpu_state = {}
+        for index in range(self.num_layers - count, self.num_layers):
+            block = self.mixtures["video"].blocks[index]
+            state = []
+            for tensor in list(block.parameters()) + list(block.buffers()):
+                backing = tensor.detach().to(device="cpu").contiguous()
+                if device.type == "cuda":
+                    backing = backing.pin_memory()
+                state.append((tensor, backing))
+                tensor.data = backing
+            self._video_block_cpu_state[index] = state
+
     def _video_source_layer(self, action_layer_idx: int) -> int:
         if self.use_fixed_video_layers is not None:
             return self.use_fixed_video_layers
@@ -388,56 +413,65 @@ class MoT(nn.Module):
         kv_cache: list[dict[str, torch.Tensor]] = []
         for layer_idx in range(layer_count):
             block = expert.blocks[layer_idx]
-            # Build video Q/K/V from current layer input tokens.
-            (
-                q,
-                k,
-                v,
-                residual_x,
-                gate_msa,
-                shift_mlp,
-                scale_mlp,
-                gate_mlp,
-                use_gradient_checkpointing,
-            ) = self._build_expert_attention_io(
-                expert=expert,
-                block=block,
-                x=x,
-                freqs=video_freqs,
-                t_mod=video_t_mod,
-            )
-            # Video prefill uses only video self-attention mask.
-            mixed = self._mixed_attention(
-                q_cat=q,
-                k_cat=k,
-                v_cat=v,
-                attention_mask=video_attention_mask,
-                num_heads=expert.num_heads,
-            )
-            cache_entry: dict[str, torch.Tensor] = {}
-            if self.use_video_tokens:
-                if self.use_fixed_video_layers is None or layer_idx == self.use_fixed_video_layers:
-                    cache_entry.update({"tokens": x, "freqs": video_freqs})
-            elif self.use_fixed_video_layers is None or layer_idx == self.use_fixed_video_layers:
-                cache_entry.update({"k": k, "v": v})
+            offloaded_state = getattr(self, "_video_block_cpu_state", {}).get(layer_idx, ())
+            if offloaded_state and self.training:
+                raise ValueError("Video block offload is inference-only.")
+            for tensor, backing in offloaded_state:
+                tensor.data = backing.to(device=x.device, non_blocking=True)
+            try:
+                # Build video Q/K/V from current layer input tokens.
+                (
+                    q,
+                    k,
+                    v,
+                    residual_x,
+                    gate_msa,
+                    shift_mlp,
+                    scale_mlp,
+                    gate_mlp,
+                    use_gradient_checkpointing,
+                ) = self._build_expert_attention_io(
+                    expert=expert,
+                    block=block,
+                    x=x,
+                    freqs=video_freqs,
+                    t_mod=video_t_mod,
+                )
+                # Video prefill uses only video self-attention mask.
+                mixed = self._mixed_attention(
+                    q_cat=q,
+                    k_cat=k,
+                    v_cat=v,
+                    attention_mask=video_attention_mask,
+                    num_heads=expert.num_heads,
+                )
+                cache_entry: dict[str, torch.Tensor] = {}
+                if self.use_video_tokens:
+                    if self.use_fixed_video_layers is None or layer_idx == self.use_fixed_video_layers:
+                        cache_entry.update({"tokens": x, "freqs": video_freqs})
+                elif self.use_fixed_video_layers is None or layer_idx == self.use_fixed_video_layers:
+                    cache_entry.update({"k": k, "v": v})
 
-            # Update video tokens for the next layer and persist its action input.
-            x = self._apply_post_with_optional_checkpoint(
-                block=block,
-                residual_x=residual_x,
-                gate_msa=gate_msa,
-                shift_mlp=shift_mlp,
-                scale_mlp=scale_mlp,
-                gate_mlp=gate_mlp,
-                use_gradient_checkpointing=use_gradient_checkpointing,
-                mixed_slice=mixed,
-                context_payload=video_context_payload,
-            )
-            kv_cache.append(cache_entry)
-            if video_feature_callback is not None:
-                # Outside checkpointed blocks: retain the original graph, and
-                # do not collect again during backward recomputation.
-                video_feature_callback(layer_idx, x)
+                # Update video tokens for the next layer and persist its action input.
+                x = self._apply_post_with_optional_checkpoint(
+                    block=block,
+                    residual_x=residual_x,
+                    gate_msa=gate_msa,
+                    shift_mlp=shift_mlp,
+                    scale_mlp=scale_mlp,
+                    gate_mlp=gate_mlp,
+                    use_gradient_checkpointing=use_gradient_checkpointing,
+                    mixed_slice=mixed,
+                    context_payload=video_context_payload,
+                )
+                kv_cache.append(cache_entry)
+                if video_feature_callback is not None:
+                    # Outside checkpointed blocks: retain the original graph, and
+                    # do not collect again during backward recomputation.
+                    video_feature_callback(layer_idx, x)
+            finally:
+                for tensor, backing in offloaded_state:
+                    tensor.data = backing
         if return_final_tokens:
             return kv_cache, x
         return kv_cache

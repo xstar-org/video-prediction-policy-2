@@ -197,6 +197,14 @@ class RoboDojoVPP2Policy:
         model.action_expert.load_state_dict(payload["action_expert"], strict=True)
         model.proprio_encoder.load_state_dict(payload["proprio_encoder"], strict=True)
         self.model = model.eval()
+        offload_blocks = int(os.environ.get("VPP2_VIDEO_BLOCK_OFFLOAD", "0"))
+        if offload_blocks:
+            self.model.mot.set_video_block_offload(offload_blocks)
+        self.model.offload_text_encoder = os.environ.get(
+            "VPP2_TEXT_ENCODER_OFFLOAD", "0"
+        ) == "1"
+        if self.model.offload_text_encoder:
+            self.model.text_encoder.to(device="cpu")
         self.processor = instantiate(data.processor).eval()
         stats = (
             Path(dataset_stats_path)
