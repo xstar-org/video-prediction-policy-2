@@ -6,12 +6,16 @@ Official implementation of **["Video Prediction Policy 2: Predict Better, Act Be
 
 [![arXiv: 2610.10270](assets/badges/arxiv.svg)](https://arxiv.org/abs/2610.10270)
 [![Project Page](assets/badges/project-page.svg)](https://robert-gyj.github.io/video-prediction-policy-2/)
-[![ModelScope — Models](assets/badges/modelscope.svg)](https://modelscope.cn/models/haodong123/VPP2_preview)
+[![ModelScope — Models](assets/badges/modelscope.svg)](https://modelscope.cn/models/haodong123/VPP2)
 [![Hugging Face — Models](assets/badges/huggingface.svg)](https://huggingface.co/Haodong082399/VPP2)
 
 </div>
 
 ## News
+
+- **[2026-10-12]** 🎬 **RoboDojo history-conditioned video training code is now open source!** See the [training guide](docs/robodojo.md#train-video-10k) for the Video-10k recipe starting from our Stage-2 video model.
+
+- **[2026-10-10]** 🎬 **VPP2 video model weights are now available!** Download the **Stage-1 (49 frames)** and **Stage-2 (17 frames)** checkpoints on [Hugging Face](https://huggingface.co/Haodong082399/VPP2/tree/main/checkpoints_video) and [ModelScope](https://modelscope.cn/models/haodong123/VPP2/files), and get started with our [zero-shot video prediction guide](docs/video_prediction.md).
 
 - **[2026-10-08]** 🥇 **VPP2 ranks #1 overall on the official [RoboDojo-Sim leaderboard](https://robodojo-benchmark.com/leaderboard)**, achieving state-of-the-art performance across agent and non-agent tracks with **39.26 Score** and **32.26% SR**.
 
@@ -20,11 +24,12 @@ Official implementation of **["Video Prediction Policy 2: Predict Better, Act Be
 We introduce **Video Prediction Policy 2 (VPP2)**, a world-action model (WAM) with
 strong zero-shot generalization in both video prediction and action generation.
 
-Our pipeline has three stages:
+Our pipeline has three stages: (1) **event-level video pretraining**, (2) **single-step visual planning through post-training and distillation**, and (3) **action learning with a mixture-of-transformers (MoT) architecture**.
 
-1. **Event-level video pretraining.** Continue pretraining the base video model on a large, diverse dataset of manipulation videos with detailed captions to improve generalization across open-ended tasks.
-2. **Single-step visual planning.** Post-train and distill the video model into a single-step visual planner with a fixed prediction horizon.
-3. **Action learning.** Add an action module through a mixture-of-transformers (MoT) architecture to learn an implicit inverse dynamics model.
+This codebase includes:
+
+- **[Zero-shot video prediction](docs/video_prediction.md).** Generate videos from an initial image and a text instruction using the **Stage-1 (49 frames)** or **Stage-2 (17 frames)** video model, with input preparation, prompt enhancement, and ready-to-run examples.
+- **Policy post-training on [RoboDojo](docs/robodojo.md) and [LIBERO](docs/libero.md).** Training configurations and scripts for adapting VPP2 to both benchmarks, together with policy evaluation workflows. For RoboDojo, we add **history frames to the model input** to support tasks that require memory. To accommodate this architecture change, we start post-training from the **Stage-2 video model before distillation**.
 
 <p align="center">
   <a href="assets/teaser.png"><img src="assets/teaser.png" alt="VPP2 paper overview: event-level video prediction, instruction following, and robot policy learning." width="100%"></a>
@@ -50,31 +55,42 @@ is unnecessary. For inference and data processing only, use `requirements.txt`.
 
 ## Get started
 
+### Zero-shot video prediction
+
+| Task | What is included | Guide |
+|---|---|---|
+| Video prediction | Input image processing, prompt enhancement, and single-image or batch video prediction with [sample inputs](assets/random_samples/). | [Video prediction guide](docs/video_prediction.md) |
+
+### Policy learning
+
 | Benchmark | What is included | Guide |
 |---|---|---|
-| RoboDojo | Joint video–action training, checkpoint export, policy serving, and closed-loop evaluation | [RoboDojo guide](docs/robodojo.md) |
-| LIBERO | Video-stage training, action training, and standard benchmark evaluation | [LIBERO guide](docs/libero.md) |
-| LIBERO-OOD / PRO | Generalization evaluation with the LIBERO policy checkpoint | [OOD and PRO setup](docs/libero.md#6-prepare-three-isolated-simulator-runtimes) |
-
-RoboDojo configurations live in [`configs/robodojo/`](configs/robodojo/); LIBERO
-configurations live in [`configs/libero/`](configs/libero/). Follow the guide for
-the benchmark you want to use.
+| RoboDojo | Joint Video + Action2B training, checkpoint export, policy serving, and closed-loop evaluation | [RoboDojo guide](docs/robodojo.md) |
+| LIBERO | Video-stage training, action training, and evaluation on LIBERO, LIBERO-OOD, and LIBERO-PRO | [LIBERO guide](docs/libero.md) |
 
 ## Model Weights
 
 Weights are available on [Hugging Face](https://huggingface.co/Haodong082399/VPP2) and
-[ModelScope](https://modelscope.cn/models/haodong123/VPP2_preview).
+[ModelScope](https://modelscope.cn/models/haodong123/VPP2).
 The Hugging Face repository is public; ModelScope requires an account with access.
 
 | Checkpoint | Use | Hugging Face | ModelScope |
 |---|---|---|---|
-| RoboDojo history-conditioned Video-10k | Starting Video model for joint + Action2B training | [Download](https://huggingface.co/Haodong082399/VPP2/resolve/main/checkpoints/initialization/robodojo_his10k.pt?download=true) | [ModelScope](https://www.modelscope.cn/api/v1/models/haodong123/VPP2_preview/repo?Revision=master&FilePath=checkpoints/initialization/robodojo_his10k.pt) |
-| RoboDojo joint Video-100k | Video model paired with Action2B-100k for evaluation | [Download](https://huggingface.co/Haodong082399/VPP2/resolve/main/checkpoints/joint2b_s100000/video.pt?download=true) | [ModelScope](https://www.modelscope.cn/api/v1/models/haodong123/VPP2_preview/repo?Revision=master&FilePath=checkpoints/joint2b_s100000/video.pt) |
-| RoboDojo Action2B-100k | RoboDojo policy evaluation | [Download](https://huggingface.co/Haodong082399/VPP2/resolve/main/checkpoints/joint2b_s100000/action.pt?download=true) | [ModelScope](https://www.modelscope.cn/api/v1/models/haodong123/VPP2_preview/repo?Revision=master&FilePath=checkpoints/joint2b_s100000/action.pt) |
-| LIBERO Video-10k | Video model for Action training and evaluation | [Download](https://huggingface.co/Haodong082399/VPP2/resolve/main/checkpoints/libero/video_step010000.pt?download=true) | [ModelScope](https://www.modelscope.cn/api/v1/models/haodong123/VPP2_preview/repo?Revision=master&FilePath=checkpoints/libero/video_step010000.pt) |
-| LIBERO Action-30k | LIBERO, LIBERO-OOD and LIBERO-PRO evaluation | [Download](https://huggingface.co/Haodong082399/VPP2/resolve/main/checkpoints/libero/action_step030000.pt?download=true) | [ModelScope](https://www.modelscope.cn/api/v1/models/haodong123/VPP2_preview/repo?Revision=master&FilePath=checkpoints/libero/action_step030000.pt) |
+| VPP2 Stage-1 Video (49 frames) | Zero-shot video prediction(Event level) | [Download](https://huggingface.co/Haodong082399/VPP2#stage-1-video) | [Download](https://www.modelscope.cn/api/v1/models/haodong123/VPP2/repo?Revision=master&FilePath=checkpoints_video/vpp2-video-stage1-49f.pth) |
+| VPP2 Stage-2 Video (17 frames) | Zero-shot video prediction (Fixed time horizon) | [Download](https://huggingface.co/Haodong082399/VPP2#stage-2-video) | [Download](https://www.modelscope.cn/api/v1/models/haodong123/VPP2/repo?Revision=master&FilePath=checkpoints_video/vpp2-video-stage2-17f.pth) |
+| RoboDojo history-conditioned Video-10k | Starting Video model for joint + Action2B training | [Download](https://huggingface.co/Haodong082399/VPP2#robodojo-training) | [Download](https://www.modelscope.cn/api/v1/models/haodong123/VPP2/repo?Revision=master&FilePath=checkpoints/initialization/robodojo_his10k.pt) |
+| RoboDojo joint Video-100k | Video model paired with Action2B-100k for evaluation | [Download](https://huggingface.co/Haodong082399/VPP2#robodojo-evaluation) | [Download](https://www.modelscope.cn/api/v1/models/haodong123/VPP2/repo?Revision=master&FilePath=checkpoints/joint2b_s100000/video.pt) |
+| RoboDojo Action2B-100k | RoboDojo policy evaluation | [Download](https://huggingface.co/Haodong082399/VPP2#robodojo-evaluation) | [Download](https://www.modelscope.cn/api/v1/models/haodong123/VPP2/repo?Revision=master&FilePath=checkpoints/joint2b_s100000/action.pt) |
+| LIBERO Video-10k | Video model for Action training and evaluation | [Download](https://huggingface.co/Haodong082399/VPP2#libero) | [Download](https://www.modelscope.cn/api/v1/models/haodong123/VPP2/repo?Revision=master&FilePath=checkpoints/libero/video_step010000.pt) |
+| LIBERO Action-30k | LIBERO, LIBERO-OOD and LIBERO-PRO evaluation | [Download](https://huggingface.co/Haodong082399/VPP2#libero) | [Download](https://www.modelscope.cn/api/v1/models/haodong123/VPP2/repo?Revision=master&FilePath=checkpoints/libero/action_step030000.pt) |
 
-Evaluation uses the matching Video and Action checkpoints together. Shared Wan2.1
+The Hugging Face download instructions include the root `config.json` with each checkpoint.
+
+The Stage-1 and Stage-2 video checkpoints are available on the Hugging Face main branch
+and mirrored on ModelScope.
+See the [video prediction guide](docs/video_prediction.md) for input preparation and inference.
+
+Policy evaluation uses the matching Video and Action checkpoints together. Shared Wan2.1
 VAE, CLIP, UMT5 and tokenizer assets are also available in the model repositories
 under `checkpoints/Wan2.1-I2V-14B-480P/`. Follow the benchmark guides to download the
 complete assets and normalization files:
@@ -82,10 +98,9 @@ complete assets and normalization files:
 - [RoboDojo downloads and evaluation](docs/robodojo.md#checkpoint-downloads)
 - [LIBERO / OOD / PRO downloads and evaluation](docs/libero.md#3-data-and-required-model-files)
 
-## TODO
+<!-- ## TODO
 
-- [ ] Release the robot-video pretrained backbone checkpoint.
-- [ ] Release large-scale, event-level video pretraining code and configurations.
+- [ ] Release large-scale, event-level video pretraining code and configurations. -->
 
 ## Links
 
@@ -94,12 +109,14 @@ complete assets and normalization files:
 | Paper | [arXiv:2610.10270](https://arxiv.org/abs/2610.10270) |
 | Project page | [VPP2 Project Page](https://robert-gyj.github.io/video-prediction-policy-2/) |
 | XPolicyLab adapter | [VPP2 RoboDojo adapter PR](https://github.com/XPolicyLab/XPolicyLab/pull/150) |
-| ModelScope | [haodong123/VPP2_preview](https://modelscope.cn/models/haodong123/VPP2_preview) |
+| ModelScope | [haodong123/VPP2](https://modelscope.cn/models/haodong123/VPP2) |
 | Hugging Face | [Haodong082399/VPP2](https://huggingface.co/Haodong082399/VPP2) |
 
 ## Documentation
 
+- [Zero-shot video prediction](docs/video_prediction.md)
 - [RoboDojo: training and testing](docs/robodojo.md)
+- [RoboDojo Video-10k training from Stage-2 Video](docs/robodojo.md#train-video-10k)
 - [LIBERO, LIBERO-OOD and LIBERO-PRO](docs/libero.md)
 
 ## Citation

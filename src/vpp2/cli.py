@@ -24,6 +24,11 @@ def load_config(path, overrides=()):
         )
 
     cfg = OmegaConf.merge(read(path), OmegaConf.from_dotlist(list(overrides)))
+    if cfg.train_mode == "video_only":
+        from .video_training import validate_config
+
+        validate_config(cfg)
+        return cfg
     if cfg.train_mode != "joint" or cfg.checkpoint_mode != "full":
         raise ValueError("Only full joint training is supported")
     m, d = cfg.model, cfg.data.train
@@ -63,45 +68,64 @@ def train(args):
     cfg = load_config(args.config, args.overrides)
     world = int(os.environ.get("WORLD_SIZE", "1"))
     global_batch = cfg.batch_size * cfg.gradient_accumulation_steps * world
+    video_only = cfg.train_mode == "video_only"
     summary = dict(
+        train_mode=str(cfg.train_mode),
         video_initializer=str(cfg.model.dit_checkpoint_path),
-        action_initializer=str(cfg.model.action_dit_pretrained_path),
-        action_hidden=1024,
-        action_ffn=4096,
-        layers=40,
         world_size=world,
         global_batch_size=global_batch,
-        reference_global_batch_size=288,
+        reference_global_batch_size=int(cfg.reference_global_batch_size),
         schedule_steps=int(cfg.max_steps),
-        training_action_shift=float(cfg.model.action_scheduler.train_shift),
-        validation_action_shift=float(cfg.model.action_scheduler.infer_shift),
-        benchmark_action_shift=1,
         resume=cfg.resume,
-        lr_tail=dict(cfg.lr_tail) if cfg.get("lr_tail") else None,
-        lr_continuation=(
-            dict(cfg.lr_continuation) if cfg.get("lr_continuation") else None
-        ),
     )
+    if video_only:
+        summary.update(
+            training_video_shift=float(cfg.model.video_scheduler.train_shift),
+            video_frames=25,
+            condition_rgb_frames=9,
+            future_rgb_frames=16,
+        )
+    else:
+        summary.update(
+            action_initializer=str(cfg.model.action_dit_pretrained_path),
+            action_hidden=1024,
+            action_ffn=4096,
+            layers=40,
+            training_action_shift=float(cfg.model.action_scheduler.train_shift),
+            validation_action_shift=float(cfg.model.action_scheduler.infer_shift),
+            benchmark_action_shift=1,
+            lr_tail=dict(cfg.lr_tail) if cfg.get("lr_tail") else None,
+            lr_continuation=(
+                dict(cfg.lr_continuation) if cfg.get("lr_continuation") else None
+            ),
+        )
     print(json.dumps(summary, indent=2), flush=True)
     if args.dry_run:
         return
     if global_batch != cfg.reference_global_batch_size and not args.allow_batch_change:
         raise ValueError(
-            "Global batch differs from 288. Set accumulation or explicitly use --allow-batch-change for a diagnostic."
+            f"Global batch differs from {cfg.reference_global_batch_size}. "
+            "Set accumulation or explicitly use --allow-batch-change for a diagnostic."
         )
     if cfg.get("lr_continuation"):
         state_dir = Path(str(cfg.resume))
         state = json.loads((state_dir / "trainer_state.json").read_text())
         if not int(cfg.lr_continuation.start_step) <= int(state["global_step"]) < int(cfg.max_steps):
             raise ValueError("Restored trainer step is outside the requested continuation")
-    for value in (
+    required_paths = [
         cfg.model.model_id,
         cfg.model.dit_checkpoint_path,
-        cfg.model.action_dit_pretrained_path,
         cfg.data.train.metadata_path,
-        cfg.data.train.pretrained_norm_stats,
-        cfg.evaluation.metadata_path,
-    ):
+    ]
+    if not video_only:
+        required_paths.extend(
+            [
+                cfg.model.action_dit_pretrained_path,
+                cfg.data.train.pretrained_norm_stats,
+                cfg.evaluation.metadata_path,
+            ]
+        )
+    for value in required_paths:
         if not Path(value).exists():
             raise FileNotFoundError(value)
     out = Path(cfg.output_dir)
@@ -262,6 +286,12 @@ def main():
         p.add_argument("--" + name, required=True)
     p.add_argument("--stats", default="configs/robodojo/normalization_ee16.json")
     p.add_argument("--holdout", default="configs/robodojo/holdout.json")
+    p = sub.add_parser("convert", help="Convert official EE16 LeRobot v3 data to VPP2 episodes")
+    p.add_argument("--source", required=True)
+    p.add_argument("--output", required=True)
+    p.add_argument("--tasks", default="configs/robodojo/source_tasks.csv")
+    p.add_argument("--workers", type=int, default=4)
+    p.add_argument("--limit", type=int, help="Convert only the first N episodes for a smoke test")
     p = sub.add_parser("text-cache")
     p.add_argument("--data", required=True)
     p.add_argument("--wan", required=True)
@@ -319,7 +349,11 @@ def main():
         shutil.copytree(args.source, destination)  # refuse to overwrite another adapter
         print(destination.resolve())
         return
-    if args.command == "prepare":
+    if args.command == "convert":
+        from .convert_robodojo import convert
+
+        result = convert(args.source, args.output, args.tasks, args.workers, args.limit)
+    elif args.command == "prepare":
         from .data import prepare
 
         result = prepare(args.metadata, args.media_root, args.stats, args.output, args.holdout)
