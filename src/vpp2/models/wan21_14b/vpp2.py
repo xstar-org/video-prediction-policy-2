@@ -510,7 +510,14 @@ class VPP2(torch.nn.Module):
         (ids, mask) = self.tokenizer(prompt, return_mask=True, add_special_tokens=True)
         ids = ids.to(self.device)
         mask = mask.to(self.device, dtype=torch.bool)
-        prompt_emb = self.text_encoder(ids, mask)
+        offload_text = bool(getattr(self, "offload_text_encoder", False))
+        if offload_text:
+            self.text_encoder.to(device=self.device)
+        try:
+            prompt_emb = self.text_encoder(ids, mask)
+        finally:
+            if offload_text:
+                self.text_encoder.to(device="cpu")
         seq_lens = mask.gt(0).sum(dim=1).long()
         for i, v in enumerate(seq_lens):
             prompt_emb[i, v:] = 0
@@ -562,17 +569,12 @@ class VPP2(torch.nn.Module):
         self._restore_auxiliary_component_dtypes()
         if input_image.ndim == 3:
             input_image = input_image.unsqueeze(0)
-        if input_image.ndim != 4 or input_image.shape[0] != 1 or input_image.shape[1] != 3:
+        if input_image.ndim != 4 or input_image.shape[0] < 1 or input_image.shape[1] != 3:
             raise ValueError(
                 f"`input_image` must have shape [1,3,H,W] or [3,H,W], got {tuple(input_image.shape)}"
             )
-        image = input_image.to(device=self.device, dtype=torch.float32)[0].unsqueeze(1)
-        z = self.vae.encode(
-            [image], device=self.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride
-        )
-        if isinstance(z, list):
-            z = z[0].unsqueeze(0)
-        return z.to(device=self.device, dtype=self.torch_dtype)
+        return self._encode_video_latents(input_image.unsqueeze(2), tiled=tiled,
+                                          tile_size=tile_size, tile_stride=tile_stride)
 
     @torch.no_grad()
     def _encode_separate_condition_latents(
@@ -1226,12 +1228,15 @@ class VPP2(torch.nn.Module):
                 f"Action-only inference requires at least {self.action_visible_video_frames} video latent frames, got {latent_t} from num_video_frames={num_video_frames} and temporal_downsample_factor={temporal_factor}."
             )
         (batch_size, channels, _, latent_h, latent_w) = first_frame_latents.shape
-        return torch.randn(
-            (batch_size, channels, latent_t, latent_h, latent_w),
-            generator=generator,
-            device=rand_device,
-            dtype=torch.float32,
-        ).to(device=self.device, dtype=self.torch_dtype)
+        shape = (batch_size, channels, latent_t, latent_h, latent_w)
+        if isinstance(generator, list):
+            if len(generator) != batch_size:
+                raise ValueError("One video generator is required per batch member.")
+            noise = torch.cat([torch.randn((1, *shape[1:]), generator=g,
+                               device=rand_device, dtype=torch.float32) for g in generator])
+        else:
+            noise = torch.randn(shape, generator=generator, device=rand_device, dtype=torch.float32)
+        return noise.to(device=self.device, dtype=self.torch_dtype)
 
     def training_loss(
         self,
@@ -1479,11 +1484,13 @@ class VPP2(torch.nn.Module):
             )
         if input_image.ndim == 3:
             input_image = input_image.unsqueeze(0)
-        if input_image.ndim != 4 or input_image.shape[0] != 1 or input_image.shape[1] != 3:
+        if input_image.ndim != 4 or input_image.shape[0] < 1 or input_image.shape[1] != 3:
             raise ValueError(
                 f"`input_image` must have shape [1,3,H,W] or [3,H,W], got {tuple(input_image.shape)}"
             )
-        (_, _, height, width) = input_image.shape
+        (batch_size, _, height, width) = input_image.shape
+        if batch_size > 1 and (return_one_step_video or return_full_video):
+            raise ValueError("Batched visual-plan decoding is not supported.")
         if height % 16 != 0 or width % 16 != 0:
             raise ValueError(
                 f"`input_image` must be resized before infer, expected multiples of 16 but got HxW=({height},{width})"
@@ -1495,7 +1502,7 @@ class VPP2(torch.nn.Module):
                 )
             if proprio.ndim == 1:
                 proprio = proprio.unsqueeze(0)
-            elif proprio.ndim == 2 and proprio.shape[0] == 1:
+            elif proprio.ndim == 2 and proprio.shape[0] == batch_size:
                 pass
             else:
                 raise ValueError(
@@ -1506,27 +1513,31 @@ class VPP2(torch.nn.Module):
                     f"`proprio` last dim must be {self.proprio_dim}, got {proprio.shape[1]}"
                 )
             proprio = proprio.to(device=self.device, dtype=self.torch_dtype)
-        action_generator = (
-            None if seed is None else torch.Generator(device=rand_device).manual_seed(seed)
-        )
-        video_generator = (
-            None
-            if video_seed is None and seed is None
-            else torch.Generator(device=rand_device).manual_seed(
-                seed if video_seed is None else video_seed
-            )
-        )
+        def generators(value):
+            if isinstance(value, (list, tuple)):
+                if len(value) != batch_size:
+                    raise ValueError("One seed is required for each batch member.")
+                return [None if item is None else torch.Generator(device=rand_device).manual_seed(item)
+                        for item in value]
+            return None if value is None else torch.Generator(device=rand_device).manual_seed(value)
+
+        action_generator = generators(seed)
+        video_generator = generators(seed if video_seed is None else video_seed)
         if action_horizon % self.action_chunk_size != 0:
             raise ValueError(
                 f"`action_horizon` must be divisible by action_chunk_size={self.action_chunk_size}, got {action_horizon}"
             )
         action_token_horizon = action_horizon // self.action_chunk_size
-        latents_action = torch.randn(
-            (1, action_token_horizon, self.action_expert.action_dim),
-            generator=action_generator,
-            device=rand_device,
-            dtype=torch.float32,
-        ).to(device=self.device, dtype=self.torch_dtype)
+        action_shape = (batch_size, action_token_horizon, self.action_expert.action_dim)
+        if isinstance(action_generator, list):
+            latents_action = torch.cat([
+                torch.randn((1, *action_shape[1:]), generator=g, device=rand_device, dtype=torch.float32)
+                for g in action_generator
+            ])
+        else:
+            latents_action = torch.randn(action_shape, generator=action_generator,
+                                        device=rand_device, dtype=torch.float32)
+        latents_action = latents_action.to(device=self.device, dtype=self.torch_dtype)
         input_image = input_image.to(device=self.device, dtype=self.torch_dtype)
         if condition_video is None:
             if condition_observation_video is not None:
@@ -1540,7 +1551,7 @@ class VPP2(torch.nn.Module):
         else:
             if condition_video.ndim == 4:
                 condition_video = condition_video.unsqueeze(0)
-            if condition_video.ndim != 5 or condition_video.shape[:2] != (1, 3):
+            if condition_video.ndim != 5 or condition_video.shape[:2] != (batch_size, 3):
                 raise ValueError(
                     f"`condition_video` must be [1,3,T,H,W] or [3,T,H,W], got {tuple(condition_video.shape)}."
                 )
@@ -1557,7 +1568,7 @@ class VPP2(torch.nn.Module):
             if condition_observation_video is not None:
                 if condition_observation_video.ndim == 4:
                     condition_observation_video = condition_observation_video.unsqueeze(0)
-                if condition_observation_video.shape != (1, 3, 1, height, width):
+                if condition_observation_video.shape != (batch_size, 3, 1, height, width):
                     raise ValueError(
                         f"`condition_observation_video` must be [1,3,1,H,W] with the same spatial size as the input image, got {tuple(condition_observation_video.shape)}"
                     )
@@ -1579,7 +1590,9 @@ class VPP2(torch.nn.Module):
         if not use_prompt and (not use_context):
             raise ValueError("Either `prompt` or both `context/context_mask` must be provided.")
         if use_prompt:
-            (context, context_mask) = self.encode_prompt(prompt)
+            (context, context_mask) = self.encode_prompt(
+                [prompt] * batch_size if isinstance(prompt, str) and batch_size > 1 else prompt
+            )
         else:
             if context is None or context_mask is None:
                 raise ValueError("`context` and `context_mask` must be both provided together.")
@@ -1593,6 +1606,8 @@ class VPP2(torch.nn.Module):
                 )
             context = context.to(device=self.device, dtype=self.torch_dtype, non_blocking=True)
             context_mask = context_mask.to(device=self.device, dtype=torch.bool, non_blocking=True)
+        if context.shape[0] != batch_size or context_mask.shape[0] != batch_size:
+            raise ValueError("Prompt/context batch must match image batch.")
         if proprio is not None:
             (context, context_mask) = self._append_proprio_to_context(
                 context=context, context_mask=context_mask, proprio=proprio
@@ -1682,7 +1697,7 @@ class VPP2(torch.nn.Module):
             )
         )
         for step_t_action, step_delta_action in zip(infer_timesteps_action, infer_deltas_action):
-            timestep_action = step_t_action.unsqueeze(0).to(
+            timestep_action = step_t_action.expand(batch_size).to(
                 dtype=latents_action.dtype, device=self.device
             )
             pred_action_posi = self._predict_action_noise_with_cache(
@@ -1700,7 +1715,8 @@ class VPP2(torch.nn.Module):
                 pred_action, step_delta_action, latents_action
             )
         result = {
-            "action": self._unpack_action_tokens(latents_action)[0]
+            "action": (self._unpack_action_tokens(latents_action)[0] if batch_size == 1
+                       else self._unpack_action_tokens(latents_action))
             .detach()
             .to(device="cpu", dtype=torch.float32)
         }
