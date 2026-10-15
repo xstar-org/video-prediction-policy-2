@@ -3,6 +3,7 @@
 from collections import deque
 from pathlib import Path
 from typing import Any, Dict, Optional
+import os
 import numpy as np
 import torch
 import torchvision.transforms.functional as transforms_F
@@ -238,6 +239,7 @@ class RoboDojoVPP2Policy:
         self._inference_index_by_env = {}
         self._inference_index = 0
         self._request_context = {}
+        self.inference_batch_size = max(1, int(os.environ.get("VPP2_INFERENCE_BATCH_SIZE", "1")))
 
     _PER_ENV_STATE = (
         "_history_by_env",
@@ -378,7 +380,7 @@ class RoboDojoVPP2Policy:
         video_seed = int(action_seed + self.video_seed_offset)
         return (action_seed, video_seed)
 
-    def _infer_action_chunk(self, observation: Dict[str, Any], instruction: str) -> np.ndarray:
+    def _prepare_inference(self, observation: Dict[str, Any], instruction: str) -> dict:
         state = np.asarray(observation["joint_action"]["vector"], dtype=np.float32)
         env_idx = int(observation.get("env_idx", 0))
         image = self._latest_image_by_env.get(env_idx)
@@ -418,6 +420,10 @@ class RoboDojoVPP2Policy:
         }
         if history_condition is not None:
             infer_kwargs["condition_video"] = history_condition
+        return infer_kwargs
+
+    def _infer_action_chunk(self, observation: Dict[str, Any], instruction: str) -> np.ndarray:
+        infer_kwargs = self._prepare_inference(observation, instruction)
         with torch.no_grad():
             prediction = self.model.infer_action(**infer_kwargs)
         action = self._denormalize_action(prediction["action"])[0]
@@ -426,6 +432,33 @@ class RoboDojoVPP2Policy:
                 f"Model returned an invalid RoboDojo action chunk: expected [T,{self.output_action_dim}], got {action.shape}."
             )
         return action
+
+    def _infer_action_chunks(self, observations, instructions):
+        if len(observations) != len(instructions):
+            raise ValueError("Observation/instruction counts must match.")
+        if self.visual_planning_output_root is not None:
+            raise ValueError("Batch inference does not support visual-plan export.")
+        results = []
+        for start in range(0, len(observations), self.inference_batch_size):
+            requests = [self._prepare_inference(o, i) for o, i in
+                        zip(observations[start:start+self.inference_batch_size],
+                            instructions[start:start+self.inference_batch_size])]
+            kwargs = dict(requests[0])
+            kwargs["prompt"] = [r["prompt"] for r in requests]
+            kwargs["input_image"] = torch.stack([r["input_image"].squeeze(0) if r["input_image"].ndim == 4
+                                                  else r["input_image"] for r in requests])
+            for key in ("proprio", "context", "context_mask", "condition_video"):
+                if key in kwargs:
+                    kwargs[key] = torch.cat([r[key] for r in requests], dim=0)
+            for key in ("seed", "video_seed"):
+                kwargs[key] = [r[key] for r in requests]
+            with torch.no_grad():
+                prediction = self.model.infer_action(**kwargs)
+            actions = self._denormalize_action(prediction["action"])
+            if actions.shape[0] != len(requests) or actions.shape[-1] != self.output_action_dim:
+                raise ValueError(f"Invalid batched action shape: {actions.shape}")
+            results.extend(actions)
+        return results
 
     def reset(self) -> None:
         self._inference_index = 0
