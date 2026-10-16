@@ -510,7 +510,14 @@ class VPP2(torch.nn.Module):
         (ids, mask) = self.tokenizer(prompt, return_mask=True, add_special_tokens=True)
         ids = ids.to(self.device)
         mask = mask.to(self.device, dtype=torch.bool)
-        prompt_emb = self.text_encoder(ids, mask)
+        offload_text = bool(getattr(self, "offload_text_encoder", False))
+        try:
+            if offload_text:
+                self.text_encoder.to(device=self.device)
+            prompt_emb = self.text_encoder(ids, mask)
+        finally:
+            if offload_text:
+                self.text_encoder.to(device="cpu")
         seq_lens = mask.gt(0).sum(dim=1).long()
         for i, v in enumerate(seq_lens):
             prompt_emb[i, v:] = 0
