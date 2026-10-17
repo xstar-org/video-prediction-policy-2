@@ -102,6 +102,17 @@ def train(args):
     print(json.dumps(summary, indent=2), flush=True)
     if args.dry_run:
         return
+    # Enable rendering augmentation if requested via config
+    if cfg.get('rendering_augmentation', {}).get('enabled', False):
+        from vpp2.datasets.lerobot.rendering_augmentation import RenderingRobustnessAugmentation
+        aug_cfg = cfg.rendering_augmentation
+        augmentation = RenderingRobustnessAugmentation(
+            p_any=float(aug_cfg.get('p_any', 0.4)),
+            p_resolution=float(aug_cfg.get('p_resolution', 0.5)),
+            p_appearance=float(aug_cfg.get('p_appearance', 0.5)),
+            min_scale=float(aug_cfg.get('min_scale', 0.25)),
+        )
+        print(f"[train] rendering augmentation enabled: {dict(aug_cfg)}", flush=True)
     if global_batch != cfg.reference_global_batch_size and not args.allow_batch_change:
         raise ValueError(
             f"Global batch differs from {cfg.reference_global_batch_size}. "
