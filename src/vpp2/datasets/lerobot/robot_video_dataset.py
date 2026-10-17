@@ -128,6 +128,9 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             args={"img_w": self.video_size[1], "img_h": self.video_size[0]}
         )
         self.normalize_transform = Normalize(args={"mean": 0.5, "std": 0.5})
+        # Rendering-robustness augmentation for deployment tolerance.
+        # Disabled by default (p_any=0); enable via config for fine-tuning.
+        self.rendering_augmentation = None
         if processor is not None:
             if isinstance(processor, DictConfig):
                 processor = instantiate(processor)
@@ -217,6 +220,8 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             video = torch.cat([video[i] for i in range(num_cameras)], dim=-1)
         else:
             video = video.squeeze(0)
+        if self.rendering_augmentation is not None:
+            video = self.rendering_augmentation(video)
         video = self.resize_transform(video)
         video = self.crop_transform(video)
         video = self.normalize_transform(video)
