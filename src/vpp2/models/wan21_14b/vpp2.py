@@ -507,6 +507,20 @@ class VPP2(torch.nn.Module):
             raise ValueError(
                 "Prompt encoding requires loaded text encoder/tokenizer. Set `load_text_encoder=true` or provide precomputed `context/context_mask`."
             )
+        # Evaluation re-encodes the same instruction on every inference call;
+        # with the text encoder offloaded that means a full device round trip
+        # of the encoder weights each time. Cache embeddings by prompt content
+        # and hand out copies so callers may modify them in place.
+        if isinstance(prompt, (list, tuple)):
+            cache_key = ("seq", tuple(str(item) for item in prompt), len(prompt))
+        else:
+            cache_key = ("str", str(prompt), 1)
+        if not hasattr(self, "_prompt_embedding_cache"):
+            self._prompt_embedding_cache = {}
+        prompt_cache = self._prompt_embedding_cache
+        if cache_key in prompt_cache:
+            cached_emb, cached_mask = prompt_cache[cache_key]
+            return cached_emb.clone(), cached_mask.clone()
         (ids, mask) = self.tokenizer(prompt, return_mask=True, add_special_tokens=True)
         ids = ids.to(self.device)
         mask = mask.to(self.device, dtype=torch.bool)
@@ -522,7 +536,11 @@ class VPP2(torch.nn.Module):
         for i, v in enumerate(seq_lens):
             prompt_emb[i, v:] = 0
         mask = torch.ones_like(mask)
-        return (prompt_emb.to(device=self.device), mask)
+        result = (prompt_emb.to(device=self.device), mask)
+        if len(prompt_cache) >= getattr(self, "_prompt_cache_capacity", 64):
+            prompt_cache.pop(next(iter(prompt_cache)))
+        prompt_cache[cache_key] = (result[0].clone(), result[1].clone())
+        return result
 
     def _append_proprio_to_context(
         self, context: torch.Tensor, context_mask: torch.Tensor, proprio: Optional[torch.Tensor]
