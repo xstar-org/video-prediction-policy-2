@@ -95,6 +95,7 @@ class MoT(nn.Module):
             for tensor, backing in state:
                 tensor.data = backing.to(device=device)
         self._video_block_cpu_state = {}
+        self._offload_upload_stream = torch.cuda.Stream(device=device) if device.type == "cuda" else None
         for index in range(self.num_layers - count, self.num_layers):
             block = self.mixtures["video"].blocks[index]
             state = []
@@ -411,15 +412,44 @@ class MoT(nn.Module):
         expert = self.mixtures["video"]
         x = video_tokens
         kv_cache: list[dict[str, torch.Tensor]] = []
+        upload_stream = getattr(self, "_offload_upload_stream", None)
+        cpu_state = getattr(self, "_video_block_cpu_state", {})
+        # Pipelined prefetch: upload layer N+1 on a side stream while
+        # layer N computes on the main stream, hiding the PCIe latency.
+        _prefetched: dict[int, tuple[list, torch.cuda.Event]] = {}
+
+        def _start_prefetch(idx: int) -> None:
+            state = cpu_state.get(idx, ())
+            if not state or upload_stream is None:
+                return
+            with torch.cuda.stream(upload_stream):
+                gpu_tensors = [backing.to(device=x.device, non_blocking=True)
+                               for _, backing in state]
+            event = torch.cuda.Event()
+            event.record(upload_stream)
+            _prefetched[idx] = (gpu_tensors, event)
+
+        def _consume_prefetch(idx: int, state: list) -> None:
+            entry = _prefetched.pop(idx, None)
+            if entry is not None:
+                gpu_tensors, event = entry
+                torch.cuda.current_stream().wait_event(event)
+                for (tensor, _), gpu_t in zip(state, gpu_tensors):
+                    tensor.data = gpu_t
+            else:
+                for tensor, backing in state:
+                    tensor.data = backing.to(device=x.device, non_blocking=True)
+
         for layer_idx in range(layer_count):
             block = expert.blocks[layer_idx]
-            offloaded_state = getattr(self, "_video_block_cpu_state", {}).get(layer_idx, ())
+            offloaded_state = cpu_state.get(layer_idx, ())
             if offloaded_state and self.training:
                 raise ValueError("Video block offload is inference-only.")
+            # Kick off layer N+1's upload now (overlaps with layer N compute).
+            if upload_stream is not None and (layer_idx + 1) in cpu_state:
+                _start_prefetch(layer_idx + 1)
             try:
-                # Also restore CPU ownership if a transfer fails partway through.
-                for tensor, backing in offloaded_state:
-                    tensor.data = backing.to(device=x.device, non_blocking=True)
+                _consume_prefetch(layer_idx, offloaded_state)
                 # Build video Q/K/V from current layer input tokens.
                 (
                     q,
@@ -473,6 +503,10 @@ class MoT(nn.Module):
             finally:
                 for tensor, backing in offloaded_state:
                     tensor.data = backing
+        # Drain any leftover prefetch events (e.g., on early exit).
+        for idx, (gpu_tensors, event) in _prefetched.items():
+            torch.cuda.current_stream().wait_event(event)
+        _prefetched.clear()
         if return_final_tokens:
             return kv_cache, x
         return kv_cache
