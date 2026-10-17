@@ -1,0 +1,47 @@
+# VPP2 RoboDojo rendering-robustness fine-tune from joint2b_s100000.
+# Lower LR, 10k steps, rendering augmentation enabled.
+output_dir: runs/robodojo_joint2b_augment_10k
+batch_size: 3
+num_workers: 8
+lr_scheduler_type: cosine
+learning_rate: 0.00001
+warmup_steps: 100
+num_epochs: 1
+max_steps: 10000
+lr_tail:
+  start_step: 8000
+  end_step: 10000
+  start_ratio: 0.001
+  end_ratio: 0.0001
+log_every: 10
+save_every: 2500
+save_final_checkpoint: true
+eval_every: 2500
+eval_num_inference_steps: 10
+train_mode: joint
+optimizer_betas:
+- 0.9
+- 0.95
+checkpoint_mode: full
+gradient_accumulation_steps: 1
+mixed_precision: bf16
+seed: 100008
+max_grad_norm: 1.0
+weight_decay: 0.01
+resume: null
+resume_ckpt: null
+preflight:
+  enabled: false
+profiling:
+  enabled: false
+wandb:
+  enabled: false
+_base_: train_100k.yaml
+
+# Rendering-robustness augmentation for 1-pass and low-res tolerance
+rendering_augmentation:
+  enabled: true
+  p_any: 0.4
+  p_resolution: 0.5
+  p_appearance: 0.5
+  min_scale: 0.25
