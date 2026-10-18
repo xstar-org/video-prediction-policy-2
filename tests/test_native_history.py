@@ -62,14 +62,14 @@ class NativeHistoryTests(unittest.TestCase):
                     assert torch.equal(a,b) and am==bm
         saved=list(sparse._history_by_env[103])
         sparse.reset_env(3)
-        assert 3 not in sparse._history_mode_by_env
+        assert 3 not in sparse._history_by_env and 3 not in sparse._history_step_by_env
         sparse.observe({'env_idx':3,'tick':0,protocol.NATIVE_STEP_FIELD:0})
         assert len(sparse._history_by_env[103])==len(saved)
         sparse.reset()
         assert all(not getattr(sparse,n) for n in sparse._PER_ENV_STATE)
 
 
-    def test_missing_frame_duplicate_wrong_clock_and_protocol_switch_rejected(self):
+    def test_missing_frame_duplicate_wrong_clock_and_configuration_rejected(self):
         p=policy()
         for invalid_step in [None, True, 1.0, -1, 1, 24]:
             with self.assertRaises(ValueError):
@@ -80,7 +80,6 @@ class NativeHistoryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             p.observe({'env_idx': 0, 'tick': 24, protocol.NATIVE_STEP_FIELD: 24})
         assert p._history_step_by_env[0] == 24 and len(p._history_by_env[0]) == 9
-        with self.assertRaisesRegex(ValueError,'switching'): p.observe({'env_idx':0,'tick':25})
         p._inference_index_by_env[0]=1
         protocol.validate_inference(p,{protocol.NATIVE_STEP_FIELD:24},0)
         with self.assertRaisesRegex(ValueError,'current'): protocol.validate_inference(p,{protocol.NATIVE_STEP_FIELD:48},0)

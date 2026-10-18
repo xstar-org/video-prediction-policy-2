@@ -383,8 +383,9 @@ configuration when receiving native-indexed observations. It accepts `_vpp2_hist
 uses that absolute action index in the existing history builder. It never fills
 missing frames by copying another image.
 
-Recording modes are isolated per virtual environment and cleared by reset.
-Changing a mode without reset, missing an anchor, duplicate/out-of-order indices,
+The client selects one capture mode for each evaluation; keep it fixed until
+reset. The backend uses the native-step field directly instead of tracking a
+separate per-environment mode. Missing an anchor, duplicate/out-of-order indices,
 or inference missing a required native frame is an error. Other history/replan
 configurations reject this protocol. Prediction steps, dtype, random seeds,
 history selection and model math remain unchanged.
