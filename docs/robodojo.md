@@ -390,7 +390,10 @@ configurations reject this protocol. Prediction steps, dtype, random seeds,
 history selection and model math remain unchanged.
 
 This is an experimental, opt-in simulator capture optimization, not an official
-score equivalence claim. The client retains dense capture when native-rate video
-is requested. Fewer render calls can change temporal image state even when the
+score equivalence claim. The client sampling flag alone selects this mode; it
+does not disable simulator video writing or detect a video request. Leave the
+sampling flag off for complete native-rate capture. Videos written from sampled
+observations are not a complete native-step recording. Fewer render calls can
+change temporal image state even when the
 selected native indices are exact; validate actual RGB and closed-loop effects
 for each task before accepting it.
