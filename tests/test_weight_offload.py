@@ -49,6 +49,48 @@ class OffloadTests(unittest.TestCase):
             for tensor, backing in state:
                 self.assertEqual(tensor.data_ptr(),backing.data_ptr())
 
+    @unittest.skipUnless(torch.cuda.is_available(), 'requires CUDA allocator/streams')
+    def test_prefetched_weights_survive_until_consumer_finishes(self):
+        """Allocator reuse must not overwrite weights still read by queued kernels."""
+        if not hasattr(torch.cuda, '_sleep'):
+            self.skipTest('CUDA delay primitive unavailable')
+        torch.manual_seed(123)
+        m = self.model()
+        m.num_layers = 6
+        m.mixtures['action'] = torch.nn.Linear(2, 2).cuda()
+        m.mixtures['video'] = SimpleNamespace(
+            blocks=torch.nn.ModuleList([torch.nn.Linear(1024, 1024).cuda()
+                                        for _ in range(m.num_layers)]), num_heads=1)
+        m.set_video_block_offload(m.num_layers)
+        upload = m._offload_upload_stream
+
+        def build(**kwargs):
+            # Keep a genuine consumer queued while Python releases parameter
+            # references and the producer allocates the next layer's weights.
+            torch.cuda._sleep(2_000_000)
+            q = kwargs['block'](kwargs['x'])
+            return q, q, q, kwargs['x'], None, None, None, None, False
+
+        m._build_expert_attention_io = build
+        m._mixed_attention = lambda **kw: kw['q_cat']
+        m._apply_post_with_optional_checkpoint = lambda **kw: kw['mixed_slice']
+        args = dict(video_tokens=torch.randn(1, 32, 1024, device='cuda'),
+                    video_freqs=torch.ones(32, 1, 2, device='cuda'),
+                    video_t_mod=torch.ones(1, device='cuda'),
+                    video_context_payload=None,
+                    video_attention_mask=torch.ones(32, 32, device='cuda'))
+        with torch.inference_mode():
+            m._offload_upload_stream = None
+            reference = m.prefill_video_cache(**args)
+            torch.cuda.synchronize()
+            m._offload_upload_stream = upload
+            for _ in range(3):
+                actual = m.prefill_video_cache(**args)
+                torch.cuda.synchronize()
+                for expected_layer, actual_layer in zip(reference, actual):
+                    for key in ('k', 'v'):
+                        self.assertTrue(torch.equal(expected_layer[key], actual_layer[key]))
+
     def test_text_output_and_exception_restoration(self):
         m=VPP(); m.device='cpu'; moves=[]
         class Encoder:
@@ -56,12 +98,14 @@ class OffloadTests(unittest.TestCase):
             def __call__(self,ids,mask): return ids.float()[...,None].expand(-1,-1,2).clone()
         m.text_encoder=Encoder(); m.tokenizer=lambda *a,**kw:(torch.tensor([[1,2,3]]),torch.tensor([[1,1,0]]))
         m.offload_text_encoder=False; ref=m.encode_prompt('test')
+        m._prompt_embedding_cache.clear()  # Exercise encoder movement, not a cache hit.
         m.offload_text_encoder=True; got=m.encode_prompt('test')
         self.assertTrue(all(torch.equal(a,b) for a,b in zip(ref,got)))
         self.assertEqual(moves,['cpu','cpu'])
         class Broken(Encoder):
             def __call__(self,*a): raise RuntimeError('injected encoder failure')
         m.text_encoder=Broken(); moves.clear()
+        m._prompt_embedding_cache.clear()
         with self.assertRaisesRegex(RuntimeError,'injected'): m.encode_prompt('test')
         self.assertEqual(moves[-1],'cpu')
 
