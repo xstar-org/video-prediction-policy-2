@@ -501,6 +501,11 @@ class MoT(nn.Module):
                     # do not collect again during backward recomputation.
                     video_feature_callback(layer_idx, x)
             finally:
+                # Weights were allocated on upload_stream and consumed on the
+                # current stream. Order future reuse after the last consumer
+                # before dropping their GPU references; do not block the CPU.
+                if offloaded_state and upload_stream is not None:
+                    upload_stream.wait_stream(torch.cuda.current_stream())
                 for tensor, backing in offloaded_state:
                     tensor.data = backing
         # Drain any leftover prefetch events (e.g., on early exit).
