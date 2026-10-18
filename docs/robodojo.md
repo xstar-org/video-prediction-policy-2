@@ -376,10 +376,10 @@ The released 100k checkpoint has **680/2100** successful episodes, pooled SR
 
 ## Experimental native-frame history protocol
 
-The default policy consumes dense simulator observations. A matching XPolicyLab
-adapter may check `RoboDojoVPP2Policy.native_frame_protocol_version()` (integer `1`)
-for the released replan24, anchor+history8, stride25 configuration. Protocol v1
-accepts `_vpp2_history_native_step` only on genuinely captured observations and
+The default policy consumes dense simulator observations. Use the matching
+XPolicyLab adapter from the paired PR; no version handshake is performed.
+The backend validates the released replan24, anchor+history8, stride25
+configuration when receiving native-indexed observations. It accepts `_vpp2_history_native_step` only on genuinely captured observations and
 uses that absolute action index in the existing history builder. It never fills
 missing frames by copying another image.
 
