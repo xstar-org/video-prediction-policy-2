@@ -11,6 +11,7 @@ from hydra.utils import instantiate
 from omegaconf import OmegaConf
 from PIL import Image
 from .data import DEFAULT_PROMPT
+from .native_history import CAPABILITIES, NATIVE_STEP_FIELD, check_configuration, record_frame, validate_inference
 from .checkpoint_compat import action_config
 from .datasets.lerobot.utils.normalizer import load_dataset_stats_from_json
 
@@ -241,6 +242,7 @@ class RoboDojoVPP2Policy:
         self.visual_planning_output_root = None
         self.visual_planning_full_steps = 10
         self._history_by_env = {}
+        self._history_mode_by_env = {}
         self._history_anchor_by_env = {}
         self._history_step_by_env = {}
         self._latest_image_by_env = {}
@@ -251,6 +253,7 @@ class RoboDojoVPP2Policy:
 
     _PER_ENV_STATE = (
         "_history_by_env",
+        "_history_mode_by_env",
         "_history_anchor_by_env",
         "_history_step_by_env",
         "_latest_image_by_env",
@@ -271,6 +274,10 @@ class RoboDojoVPP2Policy:
             per_camera_video_size=self.per_camera_video_size,
         ).to(device=self.model.device, dtype=self.model.torch_dtype)
 
+    def native_frame_capabilities(self):
+        check_configuration(self)
+        return dict(CAPABILITIES)
+
     def observe(self, observation: Dict[str, Any]) -> None:
         """Consume one native simulator observation for history conditioning.
 
@@ -279,10 +286,17 @@ class RoboDojoVPP2Policy:
         chunk is requested, preserves the native 25-Hz history timeline.
         """
         env_idx = int(observation.get("env_idx", 0))
+        mode = "native" if NATIVE_STEP_FIELD in observation else "dense"
+        previous = self._history_mode_by_env.get(env_idx)
+        if previous is not None and previous != mode:
+            raise ValueError("Reset the environment before switching its history protocol")
         image = self._compose_observation_image(observation)
-        self._latest_image_by_env[env_idx] = image
-        if self.history_condition_frames > 0:
+        if mode == "native":
+            record_frame(self, image, env_idx, observation[NATIVE_STEP_FIELD], _normalized_to_uint8)
+        elif self.history_condition_frames > 0:
             self._record_history_frame(image, env_idx)
+        self._latest_image_by_env[env_idx] = image
+        self._history_mode_by_env[env_idx] = mode
 
     def _normalize_state(self, state: np.ndarray) -> torch.Tensor:
         state = np.asarray(state, dtype=np.float32)
@@ -391,6 +405,12 @@ class RoboDojoVPP2Policy:
     def _prepare_inference(self, observation: Dict[str, Any], instruction: str) -> dict:
         state = np.asarray(observation["joint_action"]["vector"], dtype=np.float32)
         env_idx = int(observation.get("env_idx", 0))
+        if self._history_mode_by_env.get(env_idx) == "native":
+            if NATIVE_STEP_FIELD not in observation:
+                raise ValueError("Native-frame inference requires an explicit action index")
+            validate_inference(self, observation, env_idx)
+        elif NATIVE_STEP_FIELD in observation:
+            raise ValueError("Record the native observation before requesting inference")
         image = self._latest_image_by_env.get(env_idx)
         if image is None:
             image = self._compose_observation_image(observation)

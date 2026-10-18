@@ -373,3 +373,24 @@ then average the five dimensions equally; pooled SR is successes / 2100.
 
 The released 100k checkpoint has **680/2100** successful episodes, pooled SR
 **32.38%**, official SR **33.53%**, and official Score **40.11**.
+
+## Experimental native-frame history protocol
+
+The default policy consumes dense simulator observations. A matching XPolicyLab
+adapter may explicitly negotiate `RoboDojoVPP2Policy.native_frame_capabilities()`
+for the released replan24, anchor+history8, stride25 configuration. Protocol v1
+accepts `_vpp2_history_native_step` only on genuinely captured observations and
+uses that absolute action index in the existing history builder. It never fills
+missing frames by copying another image.
+
+Recording modes are isolated per virtual environment and cleared by reset.
+Changing a mode without reset, missing an anchor, duplicate/out-of-order indices,
+or inference missing a required native frame is an error. Other history/replan
+configurations reject this protocol. Prediction steps, dtype, random seeds,
+history selection and model math remain unchanged.
+
+This is an experimental, opt-in simulator capture optimization, not an official
+score equivalence claim. The client retains dense capture when native-rate video
+is requested. Fewer render calls can change temporal image state even when the
+selected native indices are exact; validate actual RGB and closed-loop effects
+for each task before accepting it.
