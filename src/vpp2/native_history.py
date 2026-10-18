@@ -3,8 +3,6 @@
 Frames retain their absolute simulator action index. Skipped frames are never
 filled with a copy of a nearby image. Dense recording remains the default.
 """
-from collections import deque
-
 NATIVE_STEP_FIELD = "_vpp2_history_native_step"
 
 
@@ -25,7 +23,7 @@ def check_configuration(policy):
         raise ValueError("Native-frame v1 requires replan24, anchor+history8, stride25")
 
 
-def record_frame(policy, image, env, step, convert):
+def validate_native_frame(policy, env, step):
     check_configuration(policy)
     step = native_step(step)
     if not needs_frame(step):
@@ -33,12 +31,7 @@ def record_frame(policy, image, env, step, convert):
     last = policy._history_step_by_env.get(env)
     if ((last is None and step != 0) or (last is not None and step <= last)):
         raise ValueError("Missing anchor, duplicate, or out-of-order native frame")
-    frame = convert(image)
-    if last is None:
-        policy._history_by_env[env] = deque(maxlen=policy.history_buffer_size)
-        policy._history_anchor_by_env[env] = frame
-    policy._history_by_env[env].append((step, frame))
-    policy._history_step_by_env[env] = step
+    return step
 
 
 def validate_inference(policy, observation, env):

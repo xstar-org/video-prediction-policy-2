@@ -21,7 +21,7 @@ cls.body=[n for n in cls.body if (isinstance(n,ast.FunctionDef) and n.name in {
     or (isinstance(n,ast.Assign) and any(isinstance(v,ast.Name) and v.id=='_PER_ENV_STATE' for v in n.targets))]
 ns=dict(torch=torch,deque=deque,Any=Any,Dict=Dict,Optional=Optional,
         NATIVE_STEP_FIELD=protocol.NATIVE_STEP_FIELD,
-        record_frame=protocol.record_frame,check_configuration=protocol.check_configuration)
+        validate_native_frame=protocol.validate_native_frame,check_configuration=protocol.check_configuration)
 exec(compile(ast.Module(body=[*functions,cls],type_ignores=[]),str(source),'exec'),ns)
 
 
@@ -38,7 +38,7 @@ def policy():
     return p
 
 
-# Retain the production dense append method too.
+# Retain the shared production history append method too.
 original=ast.parse(source.read_text())
 method=next(n for n in ast.walk(original) if isinstance(n,ast.FunctionDef) and n.name=='_record_history_frame')
 exec(compile(ast.Module(body=[method],type_ignores=[]),str(source),'exec'),ns)
@@ -71,10 +71,15 @@ class NativeHistoryTests(unittest.TestCase):
 
     def test_missing_frame_duplicate_wrong_clock_and_protocol_switch_rejected(self):
         p=policy()
-        with self.assertRaises(ValueError): p.observe({'env_idx':0,'tick':24,protocol.NATIVE_STEP_FIELD:24})
+        for invalid_step in [None, True, 1.0, -1, 1, 24]:
+            with self.assertRaises(ValueError):
+                p.observe({'env_idx': 0, 'tick': 0, protocol.NATIVE_STEP_FIELD: invalid_step})
+            assert not p._history_by_env and not p._history_step_by_env
         for tick in [0,17,18,19,20,21,22,23,24]:
             p.observe({'env_idx':0,'tick':tick,protocol.NATIVE_STEP_FIELD:tick})
-        with self.assertRaises(ValueError): p.observe({'env_idx':0,'tick':24,protocol.NATIVE_STEP_FIELD:24})
+        with self.assertRaises(ValueError):
+            p.observe({'env_idx': 0, 'tick': 24, protocol.NATIVE_STEP_FIELD: 24})
+        assert p._history_step_by_env[0] == 24 and len(p._history_by_env[0]) == 9
         with self.assertRaisesRegex(ValueError,'switching'): p.observe({'env_idx':0,'tick':25})
         p._inference_index_by_env[0]=1
         protocol.validate_inference(p,{protocol.NATIVE_STEP_FIELD:24},0)

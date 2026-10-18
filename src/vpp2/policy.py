@@ -11,7 +11,7 @@ from hydra.utils import instantiate
 from omegaconf import OmegaConf
 from PIL import Image
 from .data import DEFAULT_PROMPT
-from .native_history import NATIVE_STEP_FIELD, record_frame, validate_inference
+from .native_history import NATIVE_STEP_FIELD, validate_native_frame, validate_inference
 from .checkpoint_compat import action_config
 from .datasets.lerobot.utils.normalizer import load_dataset_stats_from_json
 
@@ -287,10 +287,10 @@ class RoboDojoVPP2Policy:
         if previous is not None and previous != mode:
             raise ValueError("Reset the environment before switching its history protocol")
         image = self._compose_observation_image(observation)
-        if mode == "native":
-            record_frame(self, image, env_idx, observation[NATIVE_STEP_FIELD], _normalized_to_uint8)
-        elif self.history_condition_frames > 0:
-            self._record_history_frame(image, env_idx)
+        step = (validate_native_frame(self, env_idx, observation[NATIVE_STEP_FIELD])
+                if mode == "native" else None)
+        if mode == "native" or self.history_condition_frames > 0:
+            self._record_history_frame(image, env_idx, step=step)
         self._latest_image_by_env[env_idx] = image
         self._history_mode_by_env[env_idx] = mode
 
@@ -316,18 +316,19 @@ class RoboDojoVPP2Policy:
         normalizer = self.processor.normalizer.normalizers["action"][key]
         return normalizer.backward(action.float().cpu()).numpy()
 
-    def _record_history_frame(self, image: torch.Tensor, env_idx: int) -> None:
-        """Append one simulator observation to the per-environment history."""
+    def _record_history_frame(
+        self, image: torch.Tensor, env_idx: int, *, step: Optional[int] = None
+    ) -> None:
+        """Append a frame using a validated native index or the next dense index."""
         env_idx = int(env_idx)
         history = self._history_by_env.get(env_idx)
+        if step is None:
+            step = 0 if history is None else int(self._history_step_by_env[env_idx]) + 1
+        frame = _normalized_to_uint8(image)
         if history is None:
             history = deque(maxlen=self.history_buffer_size)
             self._history_by_env[env_idx] = history
-            step = 0
-            self._history_anchor_by_env[env_idx] = _normalized_to_uint8(image)
-        else:
-            step = int(self._history_step_by_env[env_idx]) + 1
-        frame = _normalized_to_uint8(image)
+            self._history_anchor_by_env[env_idx] = frame
         history.append((step, frame))
         self._history_step_by_env[env_idx] = step
 
