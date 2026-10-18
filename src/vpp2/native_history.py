@@ -6,7 +6,7 @@ filled with a copy of a nearby image. Dense recording remains the default.
 from collections import deque
 
 NATIVE_STEP_FIELD = "_vpp2_history_native_step"
-CAPABILITIES = {"version": 1, "replan": 24, "history_frames": 8, "stride": 25}
+PROTOCOL_VERSION = 1
 
 
 def native_step(value):

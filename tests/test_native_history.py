@@ -17,10 +17,10 @@ functions=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in {
     '_normalized_to_uint8','_uint8_to_normalized'}]
 cls=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='RoboDojoVPP2Policy')
 cls.body=[n for n in cls.body if (isinstance(n,ast.FunctionDef) and n.name in {
-    'observe','_build_history_condition','reset','reset_env','native_frame_capabilities'})
+    'observe','_build_history_condition','reset','reset_env','native_frame_protocol_version'})
     or (isinstance(n,ast.Assign) and any(isinstance(v,ast.Name) and v.id=='_PER_ENV_STATE' for v in n.targets))]
 ns=dict(torch=torch,deque=deque,Any=Any,Dict=Dict,Optional=Optional,
-        NATIVE_STEP_FIELD=protocol.NATIVE_STEP_FIELD,CAPABILITIES=protocol.CAPABILITIES,
+        NATIVE_STEP_FIELD=protocol.NATIVE_STEP_FIELD,PROTOCOL_VERSION=protocol.PROTOCOL_VERSION,
         record_frame=protocol.record_frame,check_configuration=protocol.check_configuration)
 exec(compile(ast.Module(body=[*functions,cls],type_ignores=[]),str(source),'exec'),ns)
 
@@ -65,7 +65,7 @@ class NativeHistoryTests(unittest.TestCase):
         assert 3 not in sparse._history_mode_by_env
         sparse.observe({'env_idx':3,'tick':0,protocol.NATIVE_STEP_FIELD:0})
         assert len(sparse._history_by_env[103])==len(saved)
-        assert sparse.native_frame_capabilities()==protocol.CAPABILITIES
+        assert sparse.native_frame_protocol_version()==protocol.PROTOCOL_VERSION
         sparse.reset()
         assert all(not getattr(sparse,n) for n in sparse._PER_ENV_STATE)
 
@@ -85,7 +85,7 @@ class NativeHistoryTests(unittest.TestCase):
         p._history_step_by_env[0]=48
         with self.assertRaisesRegex(ValueError,'Missing required'): protocol.validate_inference(p,{protocol.NATIVE_STEP_FIELD:48},0)
         p.replan_steps=32
-        with self.assertRaisesRegex(ValueError,'replan24'): p.native_frame_capabilities()
+        with self.assertRaisesRegex(ValueError,'replan24'): p.native_frame_protocol_version()
 
 if __name__ == "__main__":
     unittest.main()

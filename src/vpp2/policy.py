@@ -11,7 +11,7 @@ from hydra.utils import instantiate
 from omegaconf import OmegaConf
 from PIL import Image
 from .data import DEFAULT_PROMPT
-from .native_history import CAPABILITIES, NATIVE_STEP_FIELD, check_configuration, record_frame, validate_inference
+from .native_history import PROTOCOL_VERSION, NATIVE_STEP_FIELD, check_configuration, record_frame, validate_inference
 from .checkpoint_compat import action_config
 from .datasets.lerobot.utils.normalizer import load_dataset_stats_from_json
 
@@ -274,9 +274,9 @@ class RoboDojoVPP2Policy:
             per_camera_video_size=self.per_camera_video_size,
         ).to(device=self.model.device, dtype=self.model.torch_dtype)
 
-    def native_frame_capabilities(self):
+    def native_frame_protocol_version(self):
         check_configuration(self)
-        return dict(CAPABILITIES)
+        return PROTOCOL_VERSION
 
     def observe(self, observation: Dict[str, Any]) -> None:
         """Consume one native simulator observation for history conditioning.
