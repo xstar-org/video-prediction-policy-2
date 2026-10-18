@@ -373,3 +373,28 @@ then average the five dimensions equally; pooled SR is successes / 2100.
 
 The released 100k checkpoint has **680/2100** successful episodes, pooled SR
 **32.38%**, official SR **33.53%**, and official Score **40.11**.
+
+## Experimental native-frame history protocol
+
+The default policy consumes dense simulator observations. Use the matching
+XPolicyLab adapter from the paired PR; no version handshake is performed.
+The backend validates the released replan24, anchor+history8, stride25
+configuration when receiving native-indexed observations. It accepts `_vpp2_history_native_step` only on genuinely captured observations and
+uses that absolute action index in the existing history builder. It never fills
+missing frames by copying another image.
+
+The client selects one capture mode for each evaluation; keep it fixed until
+reset. The backend uses the native-step field directly instead of tracking a
+separate per-environment mode. Missing an anchor, duplicate/out-of-order indices,
+or inference missing a required native frame is an error. Other history/replan
+configurations reject this protocol. Prediction steps, dtype, random seeds,
+history selection and model math remain unchanged.
+
+This is an experimental, opt-in simulator capture optimization, not an official
+score equivalence claim. The client sampling flag alone selects this mode; it
+does not disable simulator video writing or detect a video request. Leave the
+sampling flag off for complete native-rate capture. Videos written from sampled
+observations are not a complete native-step recording. Fewer render calls can
+change temporal image state even when the
+selected native indices are exact; validate actual RGB and closed-loop effects
+for each task before accepting it.

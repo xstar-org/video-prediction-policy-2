@@ -11,6 +11,7 @@ from hydra.utils import instantiate
 from omegaconf import OmegaConf
 from PIL import Image
 from .data import DEFAULT_PROMPT
+from .native_history import NATIVE_STEP_FIELD, validate_native_frame, validate_inference
 from .checkpoint_compat import action_config
 from .datasets.lerobot.utils.normalizer import load_dataset_stats_from_json
 
@@ -280,9 +281,11 @@ class RoboDojoVPP2Policy:
         """
         env_idx = int(observation.get("env_idx", 0))
         image = self._compose_observation_image(observation)
+        step = (validate_native_frame(self, env_idx, observation[NATIVE_STEP_FIELD])
+                if NATIVE_STEP_FIELD in observation else None)
+        if step is not None or self.history_condition_frames > 0:
+            self._record_history_frame(image, env_idx, step=step)
         self._latest_image_by_env[env_idx] = image
-        if self.history_condition_frames > 0:
-            self._record_history_frame(image, env_idx)
 
     def _normalize_state(self, state: np.ndarray) -> torch.Tensor:
         state = np.asarray(state, dtype=np.float32)
@@ -306,18 +309,19 @@ class RoboDojoVPP2Policy:
         normalizer = self.processor.normalizer.normalizers["action"][key]
         return normalizer.backward(action.float().cpu()).numpy()
 
-    def _record_history_frame(self, image: torch.Tensor, env_idx: int) -> None:
-        """Append one simulator observation to the per-environment history."""
+    def _record_history_frame(
+        self, image: torch.Tensor, env_idx: int, *, step: Optional[int] = None
+    ) -> None:
+        """Append a frame using a validated native index or the next dense index."""
         env_idx = int(env_idx)
         history = self._history_by_env.get(env_idx)
+        if step is None:
+            step = 0 if history is None else int(self._history_step_by_env[env_idx]) + 1
+        frame = _normalized_to_uint8(image)
         if history is None:
             history = deque(maxlen=self.history_buffer_size)
             self._history_by_env[env_idx] = history
-            step = 0
-            self._history_anchor_by_env[env_idx] = _normalized_to_uint8(image)
-        else:
-            step = int(self._history_step_by_env[env_idx]) + 1
-        frame = _normalized_to_uint8(image)
+            self._history_anchor_by_env[env_idx] = frame
         history.append((step, frame))
         self._history_step_by_env[env_idx] = step
 
@@ -391,6 +395,8 @@ class RoboDojoVPP2Policy:
     def _prepare_inference(self, observation: Dict[str, Any], instruction: str) -> dict:
         state = np.asarray(observation["joint_action"]["vector"], dtype=np.float32)
         env_idx = int(observation.get("env_idx", 0))
+        if NATIVE_STEP_FIELD in observation:
+            validate_inference(self, observation, env_idx)
         image = self._latest_image_by_env.get(env_idx)
         if image is None:
             image = self._compose_observation_image(observation)
