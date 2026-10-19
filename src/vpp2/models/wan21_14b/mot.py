@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from .wan_video_dit import flash_attention, modulate, rope_apply
+from .action_kv import join_action_kv
 from vpp2.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -751,6 +752,24 @@ class MoT(nn.Module):
                 encoded_video_tokens[source_layer_idx] = expert.encode_video_tokens(
                     source_cache["tokens"]
                 )
+        reuse_action_kv = (
+            not self.training
+            and not torch.is_grad_enabled()
+            and not self.use_video_tokens
+            and self.use_fixed_video_layers is None
+            and not (timestep_clean_enabled and any_clean_first_frame and not all_clean_first_frame)
+        )
+        if reuse_action_kv and clean_cache_enabled:
+            # A noisy-cache-prefix route retains views of the original storage.
+            # Replacing that storage would duplicate the whole noisy cache.
+            noisy_storages = {
+                layer[key].untyped_storage().data_ptr()
+                for layer in video_kv_cache for key in ("k", "v") if key in layer
+            }
+            reuse_action_kv = not any(
+                layer[key].untyped_storage().data_ptr() in noisy_storages
+                for layer in clean_first_frame_kv_cache for key in ("k", "v") if key in layer
+            )
         for layer_idx in range(self.num_layers):
             block = expert.blocks[layer_idx]
             # Action query/key/value are still step-dependent and must be recomputed each step.
@@ -860,8 +879,11 @@ class MoT(nn.Module):
 
                 # Mixed attention: action queries attend to cached video K/V
                 # plus current action K/V.
-                k_cat = torch.cat([k_video, k_action], dim=1)
-                v_cat = torch.cat([v_video, v_action], dim=1)
+                if reuse_action_kv:
+                    k_cat, v_cat = join_action_kv(layer_cache, k_video, v_video, k_action, v_action)
+                else:
+                    k_cat = torch.cat([k_video, k_action], dim=1)
+                    v_cat = torch.cat([v_video, v_action], dim=1)
             mixed = self._mixed_attention(
                 q_cat=q_action,
                 k_cat=k_cat,
